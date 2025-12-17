@@ -46,10 +46,10 @@ whatsapp-sessions/
 backend/whatsapp-sessions/
 **/whatsapp-sessions/
 
-# Uploads (user data)
-uploads/
-backend/uploads/
-**/uploads/
+# Uploads (user data - NOT source code)
+/uploads/
+/backend/uploads/
+!/backend/src/uploads/
 
 # Test coverage
 coverage/
