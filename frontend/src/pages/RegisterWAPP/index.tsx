@@ -20,7 +20,7 @@ export default function RegisterWAPP() {
   const [loading, setLoading] = useState(false)
   const [showQRModal, setShowQRModal] = useState(false)
   const [qrCode, setQrCode] = useState('')
-  const [currentSessionId, setCurrentSessionId] = useState<number | null>(null)
+  const [, setCurrentSessionId] = useState<number | null>(null)
   const [connectionStatus, setConnectionStatus] = useState('')
 
   useEffect(() => {
