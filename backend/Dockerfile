@@ -1,5 +1,5 @@
-# Use Node.js - no Chromium needed with Baileys!
-FROM node:18-slim
+# Use Node.js 20+ - required for Baileys
+FROM node:20-slim
 
 WORKDIR /app
 
