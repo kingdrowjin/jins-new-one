@@ -83,6 +83,9 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       `session-${sessionId}`,
     );
 
+    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+    this.logger.log(`Initializing WhatsApp client with Chromium at: ${executablePath || 'default'}`);
+
     const client = new Client({
       authStrategy: new LocalAuth({
         clientId: `session-${sessionId}`,
@@ -90,6 +93,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       }),
       puppeteer: {
         headless: true,
+        executablePath,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -97,6 +101,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
           '--disable-accelerated-2d-canvas',
           '--no-first-run',
           '--no-zygote',
+          '--single-process',
           '--disable-gpu',
         ],
       },
