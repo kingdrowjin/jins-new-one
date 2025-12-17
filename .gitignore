@@ -1,47 +1,69 @@
 # Dependencies
 node_modules/
+*/node_modules/
 
-# WhatsApp Web.js cache
+# WhatsApp Web.js cache and auth
 .wwebjs_cache/
 .wwebjs_auth/
+backend/.wwebjs_cache/
+backend/.wwebjs_auth/
 
 # Build outputs
 dist/
 build/
+*/dist/
+*/build/
 
-# Environment files
+# Environment files - NEVER commit these
 .env
 .env.local
+.env.production
+.env.development
 .env.*.local
+backend/.env
+frontend/.env
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+*.sublime-*
 
 # OS
 .DS_Store
 Thumbs.db
+*.DS_Store
 
 # Logs
 *.log
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # WhatsApp sessions (sensitive data)
 whatsapp-sessions/
 backend/whatsapp-sessions/
+**/whatsapp-sessions/
 
-# Uploads
+# Uploads (user data)
 uploads/
 backend/uploads/
-
-# TypeORM migrations (if auto-generated)
-# backend/src/migrations/
+**/uploads/
 
 # Test coverage
 coverage/
+.nyc_output/
 
 # Temporary files
 *.tmp
 *.temp
+.cache/
+
+# Package manager locks (optional - uncomment if needed)
+# package-lock.json
+# yarn.lock
+
+# Compiled output
+*.js.map
+*.d.ts
