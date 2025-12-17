@@ -3,8 +3,8 @@ FROM node:18-slim
 
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
+# Copy package files explicitly
+COPY package.json package-lock.json ./
 
 # Install ALL dependencies (including devDependencies for build)
 RUN npm ci
