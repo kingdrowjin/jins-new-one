@@ -3,14 +3,14 @@ FROM node:18-slim
 
 WORKDIR /app
 
-# Copy package files explicitly
-COPY package.json package-lock.json ./
+# Copy package files from backend directory (Railway uses repo root as context)
+COPY backend/package.json backend/package-lock.json ./
 
 # Install ALL dependencies (including devDependencies for build)
 RUN npm ci
 
-# Copy source code
-COPY . .
+# Copy backend source code
+COPY backend/ .
 
 # Build the application
 RUN npm run build
