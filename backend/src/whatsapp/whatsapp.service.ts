@@ -108,8 +108,15 @@ export class WhatsappService implements OnModuleDestroy {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }) as any,
-        browser: ['Jantu', 'Chrome', '120.0.0'],
+        browser: ['Ubuntu', 'Chrome', '120.0.6099.109'],
         generateHighQualityLinkPreview: false,
+        syncFullHistory: false,
+        connectTimeoutMs: 60000,
+        qrTimeout: 40000,
+        defaultQueryTimeoutMs: 60000,
+        keepAliveIntervalMs: 25000,
+        retryRequestDelayMs: 250,
+        markOnlineOnConnect: false,
       });
 
       // Store client
