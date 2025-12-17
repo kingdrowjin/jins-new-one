@@ -19,6 +19,7 @@ export enum MessageStatus {
 export enum MessageSource {
   API = 'api',
   CAMPAIGN = 'campaign',
+  MANUAL = 'manual',
 }
 
 @Entity('message_logs')
@@ -54,6 +55,9 @@ export class MessageLog {
 
   @Column({ nullable: true })
   error: string;
+
+  @Column({ nullable: true })
+  sentAt: Date;
 
   @CreateDateColumn()
   createdAt: Date;

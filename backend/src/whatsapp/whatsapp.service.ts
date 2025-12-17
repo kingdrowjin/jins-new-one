@@ -1,21 +1,29 @@
-import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
-import { Client, LocalAuth, MessageMedia } from 'whatsapp-web.js';
+import makeWASocket, {
+  DisconnectReason,
+  useMultiFileAuthState,
+  WASocket,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
+} from '@whiskeysockets/baileys';
 import * as path from 'path';
 import * as fs from 'fs';
+import pino from 'pino';
 import { WhatsappSession, SessionStatus } from './whatsapp-session.entity';
 import { MessageLog, MessageStatus, MessageSource } from './message-log.entity';
+import { Boom } from '@hapi/boom';
 
 interface ActiveClient {
-  client: Client;
+  socket: WASocket;
   sessionId: number;
   userId: number;
 }
 
 @Injectable()
-export class WhatsappService implements OnModuleInit, OnModuleDestroy {
+export class WhatsappService implements OnModuleDestroy {
   private readonly logger = new Logger(WhatsappService.name);
   private clients: Map<number, ActiveClient> = new Map();
   private qrCallbacks: Map<number, (qr: string) => void> = new Map();
@@ -30,24 +38,10 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     private configService: ConfigService,
   ) {}
 
-  async onModuleInit() {
-    const activeSessions = await this.sessionRepository.find({
-      where: { status: SessionStatus.CONNECTED },
-    });
-
-    for (const session of activeSessions) {
-      try {
-        await this.initializeClient(session.id, session.userId);
-      } catch (error) {
-        this.logger.error(`Failed to restore session ${session.id}: ${error.message}`);
-      }
-    }
-  }
-
   async onModuleDestroy() {
     for (const [sessionId, activeClient] of this.clients) {
       try {
-        await activeClient.client.destroy();
+        activeClient.socket.end(undefined);
       } catch (error) {
         this.logger.error(`Error destroying client ${sessionId}: ${error.message}`);
       }
@@ -71,11 +65,13 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     phoneNumber?: string,
     onPairingCode?: (code: string) => void,
   ): Promise<void> {
+    // Close existing connection if any
     if (this.clients.has(sessionId)) {
       const existing = this.clients.get(sessionId);
       if (existing) {
-        await existing.client.destroy();
+        existing.socket.end(undefined);
       }
+      this.clients.delete(sessionId);
     }
 
     if (onQr) this.qrCallbacks.set(sessionId, onQr);
@@ -87,108 +83,95 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       `session-${sessionId}`,
     );
 
-    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
-    this.logger.log(`Initializing WhatsApp client with Chromium at: ${executablePath || 'default'}`);
+    // Ensure session directory exists
+    if (!fs.existsSync(sessionPath)) {
+      fs.mkdirSync(sessionPath, { recursive: true });
+    }
 
-    const client = new Client({
-      authStrategy: new LocalAuth({
-        clientId: `session-${sessionId}`,
-        dataPath: this.configService.get('WHATSAPP_SESSION_PATH', './whatsapp-sessions'),
-      }),
-      puppeteer: {
-        headless: true,
-        executablePath,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--no-first-run',
-          '--no-zygote',
-          '--single-process',
-          '--disable-gpu',
-          '--disable-extensions',
-          '--disable-background-networking',
-          '--disable-background-timer-throttling',
-          '--disable-backgrounding-occluded-windows',
-          '--disable-breakpad',
-          '--disable-component-extensions-with-background-pages',
-          '--disable-component-update',
-          '--disable-default-apps',
-          '--disable-features=TranslateUI',
-          '--disable-hang-monitor',
-          '--disable-ipc-flooding-protection',
-          '--disable-popup-blocking',
-          '--disable-prompt-on-repost',
-          '--disable-renderer-backgrounding',
-          '--disable-sync',
-          '--metrics-recording-only',
-          '--mute-audio',
-          '--no-default-browser-check',
-        ],
-      },
-      qrMaxRetries: 5,
-    });
-
-    client.on('qr', (qr) => {
-      this.logger.log(`QR code generated for session ${sessionId}`);
-      const callback = this.qrCallbacks.get(sessionId);
-      if (callback) callback(qr);
-    });
-
-    client.on('ready', async () => {
-      this.logger.log(`Client ready for session ${sessionId}`);
-      const info = client.info;
-      await this.sessionRepository.update(sessionId, {
-        status: SessionStatus.CONNECTED,
-        phoneNumber: info?.wid?.user || undefined,
-      });
-
-      const statusCallback = this.statusCallbacks.get(sessionId);
-      if (statusCallback) {
-        statusCallback('ready', { phoneNumber: info?.wid?.user });
-      }
-    });
-
-    client.on('authenticated', () => {
-      this.logger.log(`Client authenticated for session ${sessionId}`);
-      const statusCallback = this.statusCallbacks.get(sessionId);
-      if (statusCallback) statusCallback('authenticated');
-    });
-
-    client.on('auth_failure', async (msg) => {
-      this.logger.error(`Auth failure for session ${sessionId}: ${msg}`);
-      await this.sessionRepository.update(sessionId, {
-        status: SessionStatus.FAILED,
-      });
-      const statusCallback = this.statusCallbacks.get(sessionId);
-      if (statusCallback) statusCallback('auth_failure', { error: msg });
-    });
-
-    client.on('disconnected', async (reason) => {
-      this.logger.warn(`Client disconnected for session ${sessionId}: ${reason}`);
-      await this.sessionRepository.update(sessionId, {
-        status: SessionStatus.DISCONNECTED,
-      });
-      this.clients.delete(sessionId);
-      const statusCallback = this.statusCallbacks.get(sessionId);
-      if (statusCallback) statusCallback('disconnected', { reason });
-    });
-
-    this.clients.set(sessionId, { client, sessionId, userId });
+    this.logger.log(`Initializing Baileys client for session ${sessionId}`);
 
     try {
-      await client.initialize();
+      const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+      const { version } = await fetchLatestBaileysVersion();
 
-      // If phone number provided, request pairing code instead of QR
+      const socket = makeWASocket({
+        version,
+        auth: {
+          creds: state.creds,
+          keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
+        },
+        printQRInTerminal: false,
+        logger: pino({ level: 'silent' }),
+        browser: ['Jantu', 'Chrome', '120.0.0'],
+        generateHighQualityLinkPreview: false,
+      });
+
+      // Store client
+      this.clients.set(sessionId, { socket, sessionId, userId });
+
+      // Handle connection updates
+      socket.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        if (qr && !phoneNumber) {
+          // QR code received - send to frontend
+          this.logger.log(`QR code generated for session ${sessionId}`);
+          const callback = this.qrCallbacks.get(sessionId);
+          if (callback) callback(qr);
+        }
+
+        if (connection === 'close') {
+          const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+          this.logger.warn(`Connection closed for session ${sessionId}, reconnect: ${shouldReconnect}`);
+
+          if (!shouldReconnect) {
+            await this.sessionRepository.update(sessionId, {
+              status: SessionStatus.DISCONNECTED,
+            });
+            this.clients.delete(sessionId);
+            const statusCallback = this.statusCallbacks.get(sessionId);
+            if (statusCallback) statusCallback('disconnected', { reason: 'logged_out' });
+          }
+        } else if (connection === 'open') {
+          this.logger.log(`Client connected for session ${sessionId}`);
+
+          // Get phone number from socket
+          const phoneNum = socket.user?.id?.split(':')[0] || socket.user?.id;
+
+          await this.sessionRepository.update(sessionId, {
+            status: SessionStatus.CONNECTED,
+            phoneNumber: phoneNum,
+          });
+
+          const statusCallback = this.statusCallbacks.get(sessionId);
+          if (statusCallback) {
+            statusCallback('ready', { phoneNumber: phoneNum });
+          }
+        }
+      });
+
+      // Handle credential updates
+      socket.ev.on('creds.update', saveCreds);
+
+      // Request pairing code if phone number provided
       if (phoneNumber) {
-        this.logger.log(`Requesting pairing code for phone: ${phoneNumber}`);
-        const formattedPhone = phoneNumber.replace(/[^0-9]/g, '');
-        const code = await client.requestPairingCode(formattedPhone);
-        this.logger.log(`Pairing code generated for session ${sessionId}: ${code}`);
-        const pairingCallback = this.pairingCodeCallbacks.get(sessionId);
-        if (pairingCallback) pairingCallback(code);
+        // Wait a bit for connection to be ready
+        setTimeout(async () => {
+          try {
+            const formattedPhone = phoneNumber.replace(/[^0-9]/g, '');
+            this.logger.log(`Requesting pairing code for phone: ${formattedPhone}`);
+            const code = await socket.requestPairingCode(formattedPhone);
+            this.logger.log(`Pairing code generated for session ${sessionId}: ${code}`);
+            const pairingCallback = this.pairingCodeCallbacks.get(sessionId);
+            if (pairingCallback) pairingCallback(code);
+          } catch (error) {
+            this.logger.error(`Failed to get pairing code: ${error.message}`);
+            const statusCallback = this.statusCallbacks.get(sessionId);
+            if (statusCallback) statusCallback('error', { error: error.message });
+          }
+        }, 2000);
       }
+
     } catch (error) {
       this.logger.error(`Failed to initialize client ${sessionId}: ${error.message}`);
       await this.sessionRepository.update(sessionId, {
@@ -212,25 +195,30 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
     const activeClient = this.clients.get(sessionId);
     if (activeClient) {
-      await activeClient.client.destroy();
+      try {
+        activeClient.socket.end(undefined);
+      } catch (e) {
+        // Ignore
+      }
       this.clients.delete(sessionId);
     }
 
+    // Delete session folder
     const sessionPath = path.join(
       this.configService.get('WHATSAPP_SESSION_PATH', './whatsapp-sessions'),
       `session-${sessionId}`,
     );
-
-    try {
-      if (fs.existsSync(sessionPath)) {
-        fs.rmSync(sessionPath, { recursive: true });
-      }
-    } catch (error) {
-      this.logger.error(`Failed to delete session files: ${error.message}`);
+    if (fs.existsSync(sessionPath)) {
+      fs.rmSync(sessionPath, { recursive: true, force: true });
     }
 
     await this.sessionRepository.delete(sessionId);
     return true;
+  }
+
+  isSessionActive(sessionId: number): boolean {
+    const client = this.clients.get(sessionId);
+    return !!client && !!client.socket.user;
   }
 
   async sendMessage(
@@ -239,68 +227,92 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     recipient: string,
     message: string,
     mediaPath?: string,
-    source: MessageSource = MessageSource.API,
+    source: MessageSource = MessageSource.MANUAL,
   ): Promise<MessageLog> {
+    const activeClient = this.clients.get(sessionId);
+    if (!activeClient) {
+      throw new Error('Session not active');
+    }
+
+    // Format recipient number
+    let formattedNumber = recipient.replace(/[^0-9]/g, '');
+    if (!formattedNumber.includes('@')) {
+      formattedNumber = `${formattedNumber}@s.whatsapp.net`;
+    }
+
     const log = this.messageLogRepository.create({
       userId,
       sessionId,
       recipient,
       message,
-      source,
       status: MessageStatus.PENDING,
+      source,
     });
     await this.messageLogRepository.save(log);
 
-    const activeClient = this.clients.get(sessionId);
-    if (!activeClient) {
-      log.status = MessageStatus.FAILED;
-      log.error = 'Session not connected';
-      await this.messageLogRepository.save(log);
-      throw new Error('Session not connected');
-    }
-
     try {
-      const formattedNumber = this.formatPhoneNumber(recipient);
-      const chatId = `${formattedNumber}@c.us`;
-
       if (mediaPath && fs.existsSync(mediaPath)) {
-        const media = MessageMedia.fromFilePath(mediaPath);
-        await activeClient.client.sendMessage(chatId, media, { caption: message });
+        // Send media message
+        const mimeType = this.getMimeType(mediaPath);
+        const mediaBuffer = fs.readFileSync(mediaPath);
+
+        if (mimeType.startsWith('image/')) {
+          await activeClient.socket.sendMessage(formattedNumber, {
+            image: mediaBuffer,
+            caption: message,
+          });
+        } else if (mimeType.startsWith('video/')) {
+          await activeClient.socket.sendMessage(formattedNumber, {
+            video: mediaBuffer,
+            caption: message,
+          });
+        } else if (mimeType === 'application/pdf') {
+          await activeClient.socket.sendMessage(formattedNumber, {
+            document: mediaBuffer,
+            mimetype: mimeType,
+            fileName: path.basename(mediaPath),
+            caption: message,
+          });
+        } else {
+          await activeClient.socket.sendMessage(formattedNumber, {
+            document: mediaBuffer,
+            mimetype: mimeType,
+            fileName: path.basename(mediaPath),
+          });
+        }
       } else {
-        await activeClient.client.sendMessage(chatId, message);
+        // Send text message
+        await activeClient.socket.sendMessage(formattedNumber, { text: message });
       }
 
       log.status = MessageStatus.SENT;
-      await this.messageLogRepository.save(log);
-      return log;
+      log.sentAt = new Date();
     } catch (error) {
       log.status = MessageStatus.FAILED;
       log.error = error.message;
-      await this.messageLogRepository.save(log);
-      throw error;
+      this.logger.error(`Failed to send message: ${error.message}`);
     }
+
+    await this.messageLogRepository.save(log);
+    return log;
   }
 
-  async sendMessageWithButtons(
-    sessionId: number,
-    userId: number,
-    recipient: string,
-    message: string,
-    buttons: { text: string; url?: string; phoneNumber?: string }[],
-    mediaPath?: string,
-    source: MessageSource = MessageSource.API,
-  ): Promise<MessageLog> {
-    let fullMessage = message;
-
-    buttons.forEach((btn, index) => {
-      if (btn.url) {
-        fullMessage += `\n\n${btn.text}: ${btn.url}`;
-      } else if (btn.phoneNumber) {
-        fullMessage += `\n\n${btn.text}: ${btn.phoneNumber}`;
-      }
-    });
-
-    return this.sendMessage(sessionId, userId, recipient, fullMessage, mediaPath, source);
+  private getMimeType(filePath: string): string {
+    const ext = path.extname(filePath).toLowerCase();
+    const mimeTypes: { [key: string]: string } = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+      '.mp4': 'video/mp4',
+      '.avi': 'video/avi',
+      '.mov': 'video/quicktime',
+      '.pdf': 'application/pdf',
+      '.doc': 'application/msword',
+      '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    };
+    return mimeTypes[ext] || 'application/octet-stream';
   }
 
   async sendMessageWithMediaUrl(
@@ -311,46 +323,75 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     mediaUrl: string,
     source: MessageSource = MessageSource.API,
   ): Promise<MessageLog> {
+    const activeClient = this.clients.get(sessionId);
+    if (!activeClient) {
+      throw new Error('Session not active');
+    }
+
+    // Format recipient number
+    let formattedNumber = recipient.replace(/[^0-9]/g, '');
+    if (!formattedNumber.includes('@')) {
+      formattedNumber = `${formattedNumber}@s.whatsapp.net`;
+    }
+
     const log = this.messageLogRepository.create({
       userId,
       sessionId,
       recipient,
       message,
-      source,
       status: MessageStatus.PENDING,
+      source,
     });
     await this.messageLogRepository.save(log);
 
-    const activeClient = this.clients.get(sessionId);
-    if (!activeClient) {
-      log.status = MessageStatus.FAILED;
-      log.error = 'Session not connected';
-      await this.messageLogRepository.save(log);
-      throw new Error('Session not connected');
-    }
-
     try {
-      const formattedNumber = this.formatPhoneNumber(recipient);
-      const chatId = `${formattedNumber}@c.us`;
+      // Download media from URL
+      const response = await fetch(mediaUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to download media: ${response.statusText}`);
+      }
+      const mediaBuffer = Buffer.from(await response.arrayBuffer());
 
-      // Fetch media from URL
-      const media = await MessageMedia.fromUrl(mediaUrl, { unsafeMime: true });
+      // Determine mime type from URL or content-type header
+      const contentType = response.headers.get('content-type') || 'application/octet-stream';
+      const urlPath = new URL(mediaUrl).pathname;
+      const ext = path.extname(urlPath).toLowerCase();
 
-      if (message) {
-        await activeClient.client.sendMessage(chatId, media, { caption: message });
+      if (contentType.startsWith('image/') || ['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) {
+        await activeClient.socket.sendMessage(formattedNumber, {
+          image: mediaBuffer,
+          caption: message,
+        });
+      } else if (contentType.startsWith('video/') || ['.mp4', '.avi', '.mov'].includes(ext)) {
+        await activeClient.socket.sendMessage(formattedNumber, {
+          video: mediaBuffer,
+          caption: message,
+        });
+      } else if (contentType === 'application/pdf' || ext === '.pdf') {
+        await activeClient.socket.sendMessage(formattedNumber, {
+          document: mediaBuffer,
+          mimetype: 'application/pdf',
+          fileName: path.basename(urlPath) || 'document.pdf',
+          caption: message,
+        });
       } else {
-        await activeClient.client.sendMessage(chatId, media);
+        await activeClient.socket.sendMessage(formattedNumber, {
+          document: mediaBuffer,
+          mimetype: contentType,
+          fileName: path.basename(urlPath) || 'file',
+        });
       }
 
       log.status = MessageStatus.SENT;
-      await this.messageLogRepository.save(log);
-      return log;
+      log.sentAt = new Date();
     } catch (error) {
       log.status = MessageStatus.FAILED;
       log.error = error.message;
-      await this.messageLogRepository.save(log);
-      throw error;
+      this.logger.error(`Failed to send media message: ${error.message}`);
     }
+
+    await this.messageLogRepository.save(log);
+    return log;
   }
 
   async getMessageLogs(userId: number, limit = 100, offset = 0): Promise<MessageLog[]> {
@@ -368,24 +409,5 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       order: { createdAt: 'DESC' },
       take: limit,
     });
-  }
-
-  getActiveSessionIds(): number[] {
-    return Array.from(this.clients.keys());
-  }
-
-  isSessionActive(sessionId: number): boolean {
-    return this.clients.has(sessionId);
-  }
-
-  private formatPhoneNumber(phone: string): string {
-    let cleaned = phone.replace(/\D/g, '');
-    if (cleaned.startsWith('0')) {
-      cleaned = '91' + cleaned.substring(1);
-    }
-    if (cleaned.length === 10) {
-      cleaned = '91' + cleaned;
-    }
-    return cleaned;
   }
 }
