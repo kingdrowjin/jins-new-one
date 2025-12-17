@@ -17,7 +17,7 @@ export default function ManageAPIKey() {
   const [newKeyName, setNewKeyName] = useState('')
   const [loading, setLoading] = useState(true)
   const [newlyCreatedKey, setNewlyCreatedKey] = useState<string | null>(null)
-  const baseUrl = 'http://localhost:3000'
+  const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:3000'
 
   useEffect(() => {
     loadApiKeys()
