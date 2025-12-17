@@ -84,7 +84,7 @@ export default function RegisterWAPP() {
         }
       })
 
-      socket.on('status', (data: { status: string; sessionId: number; phoneNumber?: string }) => {
+      socket.on('status', (data: { status: string; sessionId: number; phoneNumber?: string; error?: string }) => {
         if (data.sessionId === session.id) {
           if (data.status === 'authenticated') {
             setConnectionStatus('Authenticating...')
@@ -100,6 +100,9 @@ export default function RegisterWAPP() {
             toast.error('Authentication failed')
           } else if (data.status === 'disconnected') {
             setConnectionStatus('Disconnected')
+          } else if (data.status === 'error') {
+            setConnectionStatus('Error: ' + (data.error || 'Unknown error'))
+            toast.error(data.error || 'Failed to get pairing code')
           }
         }
       })
