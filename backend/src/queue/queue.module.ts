@@ -10,12 +10,22 @@ import { WhatsappModule } from '../whatsapp/whatsapp.module';
   imports: [
     BullModule.forRootAsync({
       imports: [ConfigModule],
-      useFactory: async (configService: ConfigService) => ({
-        redis: {
-          host: configService.get('REDIS_HOST', 'localhost'),
-          port: configService.get<number>('REDIS_PORT', 6379),
-        },
-      }),
+      useFactory: async (configService: ConfigService) => {
+        const redisUrl = configService.get('REDIS_URL');
+
+        // Railway provides REDIS_URL, parse it if available
+        if (redisUrl) {
+          return { redis: redisUrl };
+        }
+
+        // Fallback to individual host/port for local development
+        return {
+          redis: {
+            host: configService.get('REDIS_HOST', 'localhost'),
+            port: configService.get<number>('REDIS_PORT', 6379),
+          },
+        };
+      },
       inject: [ConfigService],
     }),
     BullModule.registerQueue({
