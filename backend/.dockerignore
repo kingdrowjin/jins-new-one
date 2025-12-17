@@ -1,0 +1,13 @@
+node_modules
+dist
+.git
+.gitignore
+.env
+.env.*
+*.md
+.wwebjs_cache
+.wwebjs_auth
+whatsapp-sessions
+uploads
+*.log
+.DS_Store
