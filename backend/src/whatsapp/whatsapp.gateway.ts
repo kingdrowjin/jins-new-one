@@ -13,7 +13,7 @@ import { WhatsappService } from './whatsapp.service';
 
 @WebSocketGateway({
   cors: {
-    origin: ['http://localhost:5173', 'http://localhost:3001'],
+    origin: true,
     credentials: true,
   },
   namespace: '/whatsapp',
@@ -65,6 +65,34 @@ export class WhatsappGateway implements OnGatewayConnection, OnGatewayDisconnect
         },
         (status, statusData) => {
           client.emit('status', { status, sessionId, ...statusData });
+        },
+      );
+    } catch (error: any) {
+      client.emit('error', { message: error.message, sessionId });
+    }
+  }
+
+  @SubscribeMessage('initSessionWithPhone')
+  async handleInitSessionWithPhone(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { sessionId: number; userId: number; phoneNumber: string },
+  ) {
+    const { sessionId, userId, phoneNumber } = data;
+    this.logger.log(`Initializing session ${sessionId} with phone ${phoneNumber} for user ${userId}`);
+
+    this.clientSessions.set(client.id, { userId, sessionId, socket: client });
+
+    try {
+      await this.whatsappService.initializeClient(
+        sessionId,
+        userId,
+        undefined, // No QR callback
+        (status, statusData) => {
+          client.emit('status', { status, sessionId, ...statusData });
+        },
+        phoneNumber,
+        (code) => {
+          client.emit('pairingCode', { code, sessionId });
         },
       );
     } catch (error: any) {

@@ -3,7 +3,7 @@ import { useAuth } from '../../context/AuthContext'
 import api from '../../services/api'
 import { connectSocket, disconnectSocket } from '../../services/socket'
 import toast from 'react-hot-toast'
-import { FaWhatsapp, FaTimes } from 'react-icons/fa'
+import { FaWhatsapp, FaTimes, FaQrcode, FaMobileAlt } from 'react-icons/fa'
 
 interface Session {
   id: number
@@ -13,13 +13,18 @@ interface Session {
   createdAt: string
 }
 
+type AuthMethod = 'qr' | 'phone'
+
 export default function RegisterWAPP() {
   const { user } = useAuth()
   const [sessions, setSessions] = useState<Session[]>([])
   const [sessionName, setSessionName] = useState('')
+  const [phoneNumber, setPhoneNumber] = useState('')
+  const [authMethod, setAuthMethod] = useState<AuthMethod>('phone')
   const [loading, setLoading] = useState(false)
-  const [showQRModal, setShowQRModal] = useState(false)
+  const [showModal, setShowModal] = useState(false)
   const [qrCode, setQrCode] = useState('')
+  const [pairingCode, setPairingCode] = useState('')
   const [, setCurrentSessionId] = useState<number | null>(null)
   const [connectionStatus, setConnectionStatus] = useState('')
 
@@ -45,6 +50,11 @@ export default function RegisterWAPP() {
       return
     }
 
+    if (authMethod === 'phone' && !phoneNumber.trim()) {
+      toast.error('Please enter your WhatsApp phone number')
+      return
+    }
+
     setLoading(true)
     try {
       const response = await api.post('/whatsapp/sessions', {
@@ -53,8 +63,10 @@ export default function RegisterWAPP() {
 
       const session = response.data.session
       setCurrentSessionId(session.id)
-      setShowQRModal(true)
+      setShowModal(true)
       setConnectionStatus('Initializing...')
+      setQrCode('')
+      setPairingCode('')
 
       const socket = connectSocket(user!.id)
 
@@ -62,6 +74,13 @@ export default function RegisterWAPP() {
         if (data.sessionId === session.id) {
           setQrCode(data.qr)
           setConnectionStatus('Scan QR Code with WhatsApp')
+        }
+      })
+
+      socket.on('pairingCode', (data: { code: string; sessionId: number }) => {
+        if (data.sessionId === session.id) {
+          setPairingCode(data.code)
+          setConnectionStatus('Enter this code in WhatsApp')
         }
       })
 
@@ -73,7 +92,7 @@ export default function RegisterWAPP() {
             setConnectionStatus('Connected!')
             toast.success('WhatsApp connected successfully!')
             setTimeout(() => {
-              setShowQRModal(false)
+              setShowModal(false)
               loadSessions()
             }, 2000)
           } else if (data.status === 'auth_failure') {
@@ -92,8 +111,19 @@ export default function RegisterWAPP() {
         }
       })
 
-      socket.emit('initSession', { sessionId: session.id, userId: user!.id })
+      // Use different event based on auth method
+      if (authMethod === 'phone') {
+        socket.emit('initSessionWithPhone', {
+          sessionId: session.id,
+          userId: user!.id,
+          phoneNumber: phoneNumber.replace(/[^0-9]/g, '')
+        })
+      } else {
+        socket.emit('initSession', { sessionId: session.id, userId: user!.id })
+      }
+
       setSessionName('')
+      setPhoneNumber('')
       loadSessions()
     } catch (error: any) {
       toast.error(error.response?.data?.message || 'Failed to create session')
@@ -114,11 +144,17 @@ export default function RegisterWAPP() {
     }
   }
 
-  const reconnectSession = async (sessionId: number) => {
+  const reconnectSession = async (sessionId: number, method: AuthMethod = 'phone') => {
+    if (method === 'phone' && !phoneNumber.trim()) {
+      toast.error('Please enter your WhatsApp phone number to reconnect')
+      return
+    }
+
     setCurrentSessionId(sessionId)
-    setShowQRModal(true)
+    setShowModal(true)
     setConnectionStatus('Reconnecting...')
     setQrCode('')
+    setPairingCode('')
 
     const socket = connectSocket(user!.id)
 
@@ -129,25 +165,41 @@ export default function RegisterWAPP() {
       }
     })
 
+    socket.on('pairingCode', (data: { code: string; sessionId: number }) => {
+      if (data.sessionId === sessionId) {
+        setPairingCode(data.code)
+        setConnectionStatus('Enter this code in WhatsApp')
+      }
+    })
+
     socket.on('status', (data: { status: string; sessionId: number }) => {
       if (data.sessionId === sessionId) {
         if (data.status === 'ready') {
           setConnectionStatus('Connected!')
           toast.success('WhatsApp reconnected successfully!')
           setTimeout(() => {
-            setShowQRModal(false)
+            setShowModal(false)
             loadSessions()
           }, 2000)
         }
       }
     })
 
-    socket.emit('initSession', { sessionId, userId: user!.id })
+    if (method === 'phone') {
+      socket.emit('initSessionWithPhone', {
+        sessionId,
+        userId: user!.id,
+        phoneNumber: phoneNumber.replace(/[^0-9]/g, '')
+      })
+    } else {
+      socket.emit('initSession', { sessionId, userId: user!.id })
+    }
   }
 
   const closeModal = () => {
-    setShowQRModal(false)
+    setShowModal(false)
     setQrCode('')
+    setPairingCode('')
     setCurrentSessionId(null)
     setConnectionStatus('')
     disconnectSocket()
@@ -159,25 +211,68 @@ export default function RegisterWAPP() {
 
       <div className="card mb-6">
         <h2 className="text-lg font-semibold mb-4">Register WA</h2>
-        <div className="flex gap-4 items-end">
-          <div className="flex-1">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Identification Name:
-            </label>
-            <input
-              type="text"
-              value={sessionName}
-              onChange={(e) => setSessionName(e.target.value)}
-              placeholder="MI Note 8"
-              className="w-full px-4 py-2.5 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-base"
-            />
+
+        {/* Auth Method Toggle */}
+        <div className="flex gap-2 mb-4">
+          <button
+            onClick={() => setAuthMethod('phone')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg border ${
+              authMethod === 'phone'
+                ? 'bg-green-500 text-white border-green-500'
+                : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+            }`}
+          >
+            <FaMobileAlt />
+            Phone Code (Faster)
+          </button>
+          <button
+            onClick={() => setAuthMethod('qr')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg border ${
+              authMethod === 'qr'
+                ? 'bg-green-500 text-white border-green-500'
+                : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+            }`}
+          >
+            <FaQrcode />
+            QR Code
+          </button>
+        </div>
+
+        <div className="flex flex-col gap-4">
+          <div className="flex gap-4 items-end">
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Identification Name:
+              </label>
+              <input
+                type="text"
+                value={sessionName}
+                onChange={(e) => setSessionName(e.target.value)}
+                placeholder="MI Note 8"
+                className="w-full px-4 py-2.5 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-base"
+              />
+            </div>
+            {authMethod === 'phone' && (
+              <div className="flex-1">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  WhatsApp Number (with country code):
+                </label>
+                <input
+                  type="text"
+                  value={phoneNumber}
+                  onChange={(e) => setPhoneNumber(e.target.value)}
+                  placeholder="919876543210"
+                  className="w-full px-4 py-2.5 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-base"
+                />
+              </div>
+            )}
           </div>
           <button
             onClick={createSession}
             disabled={loading}
-            className="btn-primary px-6 py-2.5 whitespace-nowrap"
+            className="btn-primary px-6 py-2.5 whitespace-nowrap self-start"
           >
-            {loading ? 'Creating...' : 'Register & Scan'}
+            {loading ? 'Creating...' : authMethod === 'phone' ? 'Register with Phone' : 'Register & Scan'}
           </button>
         </div>
       </div>
@@ -219,7 +314,7 @@ export default function RegisterWAPP() {
                       <div className="flex gap-2">
                         {session.status !== 'connected' && (
                           <button
-                            onClick={() => reconnectSession(session.id)}
+                            onClick={() => reconnectSession(session.id, authMethod)}
                             className="text-blue-500 hover:underline text-sm"
                           >
                             Reconnect
@@ -241,19 +336,34 @@ export default function RegisterWAPP() {
         )}
       </div>
 
-      {/* QR Code Modal */}
-      {showQRModal && (
+      {/* Connection Modal */}
+      {showModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
             <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-semibold">Scan QR Code</h3>
+              <h3 className="text-lg font-semibold">
+                {pairingCode ? 'Enter Pairing Code' : 'Scan QR Code'}
+              </h3>
               <button onClick={closeModal} className="text-gray-500 hover:text-gray-700">
                 <FaTimes className="text-xl" />
               </button>
             </div>
 
             <div className="text-center">
-              {qrCode ? (
+              {pairingCode ? (
+                <div className="mb-4">
+                  <div className="text-4xl font-mono font-bold tracking-widest bg-gray-100 py-6 px-4 rounded-lg text-green-600">
+                    {pairingCode}
+                  </div>
+                  <p className="mt-4 text-sm text-gray-600">
+                    1. Open WhatsApp on your phone<br/>
+                    2. Go to Settings → Linked Devices<br/>
+                    3. Tap "Link a Device"<br/>
+                    4. Tap "Link with phone number instead"<br/>
+                    5. Enter the code above
+                  </p>
+                </div>
+              ) : qrCode ? (
                 <div className="mb-4">
                   <img
                     src={`https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(qrCode)}`}
@@ -262,16 +372,21 @@ export default function RegisterWAPP() {
                   />
                 </div>
               ) : (
-                <div className="h-64 flex items-center justify-center">
+                <div className="h-64 flex items-center justify-center flex-col gap-4">
                   <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-500"></div>
+                  <p className="text-sm text-gray-500">This may take 20-40 seconds on free hosting...</p>
                 </div>
               )}
 
-              <p className="text-gray-600 mb-4">{connectionStatus}</p>
+              <p className="text-gray-600 mb-4 font-medium">{connectionStatus}</p>
 
               <div className="flex items-center justify-center gap-2 text-gray-500">
                 <FaWhatsapp className="text-green-500" />
-                <span className="text-sm">Open WhatsApp on your phone and scan this QR code</span>
+                <span className="text-sm">
+                  {pairingCode
+                    ? 'Enter this code in WhatsApp to link your device'
+                    : 'Open WhatsApp on your phone and scan this QR code'}
+                </span>
               </div>
             </div>
 

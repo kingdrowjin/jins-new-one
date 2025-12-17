@@ -19,6 +19,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WhatsappService.name);
   private clients: Map<number, ActiveClient> = new Map();
   private qrCallbacks: Map<number, (qr: string) => void> = new Map();
+  private pairingCodeCallbacks: Map<number, (code: string) => void> = new Map();
   private statusCallbacks: Map<number, (status: string, data?: any) => void> = new Map();
 
   constructor(
@@ -67,6 +68,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     userId: number,
     onQr?: (qr: string) => void,
     onStatus?: (status: string, data?: any) => void,
+    phoneNumber?: string,
+    onPairingCode?: (code: string) => void,
   ): Promise<void> {
     if (this.clients.has(sessionId)) {
       const existing = this.clients.get(sessionId);
@@ -76,6 +79,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (onQr) this.qrCallbacks.set(sessionId, onQr);
+    if (onPairingCode) this.pairingCodeCallbacks.set(sessionId, onPairingCode);
     if (onStatus) this.statusCallbacks.set(sessionId, onStatus);
 
     const sessionPath = path.join(
@@ -175,6 +179,16 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
     try {
       await client.initialize();
+
+      // If phone number provided, request pairing code instead of QR
+      if (phoneNumber) {
+        this.logger.log(`Requesting pairing code for phone: ${phoneNumber}`);
+        const formattedPhone = phoneNumber.replace(/[^0-9]/g, '');
+        const code = await client.requestPairingCode(formattedPhone);
+        this.logger.log(`Pairing code generated for session ${sessionId}: ${code}`);
+        const pairingCallback = this.pairingCodeCallbacks.get(sessionId);
+        if (pairingCallback) pairingCallback(code);
+      }
     } catch (error) {
       this.logger.error(`Failed to initialize client ${sessionId}: ${error.message}`);
       await this.sessionRepository.update(sessionId, {
