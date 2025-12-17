@@ -1,5 +1,5 @@
-# Use Node.js 20+ - required for Baileys
-FROM node:20-slim
+# Use Node.js 18 - stable for Baileys 6.x
+FROM node:18-slim
 
 WORKDIR /app
 

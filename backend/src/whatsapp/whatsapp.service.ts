@@ -2,19 +2,21 @@ import { Injectable, OnModuleDestroy, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
-import makeWASocket, {
-  DisconnectReason,
-  useMultiFileAuthState,
-  WASocket,
-  fetchLatestBaileysVersion,
-  makeCacheableSignalKeyStore,
-} from '@whiskeysockets/baileys';
 import * as path from 'path';
 import * as fs from 'fs';
 import pino from 'pino';
 import { WhatsappSession, SessionStatus } from './whatsapp-session.entity';
 import { MessageLog, MessageStatus, MessageSource } from './message-log.entity';
 import { Boom } from '@hapi/boom';
+
+// Baileys 6.x imports
+import makeWASocket, {
+  DisconnectReason,
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
+} from '@whiskeysockets/baileys';
+import type { WASocket } from '@whiskeysockets/baileys';
 
 interface ActiveClient {
   socket: WASocket;
@@ -69,7 +71,9 @@ export class WhatsappService implements OnModuleDestroy {
     if (this.clients.has(sessionId)) {
       const existing = this.clients.get(sessionId);
       if (existing) {
-        existing.socket.end(undefined);
+        try {
+          existing.socket.end(undefined);
+        } catch (e) {}
       }
       this.clients.delete(sessionId);
     }
@@ -94,14 +98,16 @@ export class WhatsappService implements OnModuleDestroy {
       const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
       const { version } = await fetchLatestBaileysVersion();
 
+      this.logger.log(`Using Baileys version: ${version.join('.')}`);
+
       const socket = makeWASocket({
         version,
         auth: {
           creds: state.creds,
-          keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
+          keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }) as any),
         },
         printQRInTerminal: false,
-        logger: pino({ level: 'silent' }),
+        logger: pino({ level: 'silent' }) as any,
         browser: ['Jantu', 'Chrome', '120.0.0'],
         generateHighQualityLinkPreview: false,
       });
@@ -113,6 +119,8 @@ export class WhatsappService implements OnModuleDestroy {
       socket.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
+        this.logger.log(`Connection update for session ${sessionId}: ${JSON.stringify({ connection, hasQr: !!qr })}`);
+
         if (qr && !phoneNumber) {
           // QR code received - send to frontend
           this.logger.log(`QR code generated for session ${sessionId}`);
@@ -121,8 +129,9 @@ export class WhatsappService implements OnModuleDestroy {
         }
 
         if (connection === 'close') {
-          const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-          this.logger.warn(`Connection closed for session ${sessionId}, reconnect: ${shouldReconnect}`);
+          const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+          const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+          this.logger.warn(`Connection closed for session ${sessionId}, code: ${statusCode}, reconnect: ${shouldReconnect}`);
 
           if (!shouldReconnect) {
             await this.sessionRepository.update(sessionId, {
@@ -155,15 +164,12 @@ export class WhatsappService implements OnModuleDestroy {
 
       // Request pairing code if phone number provided
       if (phoneNumber) {
+        this.logger.log(`Will request pairing code for phone: ${phoneNumber}`);
+
         // Wait for socket to be ready, then request pairing code
         const requestCode = async () => {
           try {
             let formattedPhone = phoneNumber.replace(/[^0-9]/g, '');
-
-            // Ensure phone has country code (at least 10 digits with country code)
-            if (formattedPhone.length < 10) {
-              throw new Error('Phone number too short. Include country code (e.g., 919904280710)');
-            }
 
             // If phone is exactly 10 digits, assume India and add 91
             if (formattedPhone.length === 10) {
@@ -171,14 +177,25 @@ export class WhatsappService implements OnModuleDestroy {
               this.logger.log(`Added India country code: ${formattedPhone}`);
             }
 
-            this.logger.log(`Requesting pairing code for phone: ${formattedPhone}`);
+            if (formattedPhone.length < 10) {
+              throw new Error('Phone number too short. Include country code (e.g., 919904280710)');
+            }
+
+            this.logger.log(`Requesting pairing code for: ${formattedPhone}`);
+
+            // Check if requestPairingCode exists
+            if (typeof socket.requestPairingCode !== 'function') {
+              throw new Error('Pairing code not supported in this version. Use QR code instead.');
+            }
+
             const code = await socket.requestPairingCode(formattedPhone);
             this.logger.log(`Pairing code generated for session ${sessionId}: ${code}`);
+
             const pairingCallback = this.pairingCodeCallbacks.get(sessionId);
             if (pairingCallback) pairingCallback(code);
-          } catch (error) {
+          } catch (error: any) {
             this.logger.error(`Failed to get pairing code: ${error.message}`);
-            this.logger.error(`Full error: ${JSON.stringify(error)}`);
+            this.logger.error(`Stack: ${error.stack}`);
             const statusCallback = this.statusCallbacks.get(sessionId);
             if (statusCallback) statusCallback('error', { error: error.message });
           }
@@ -188,11 +205,14 @@ export class WhatsappService implements OnModuleDestroy {
         setTimeout(requestCode, 3000);
       }
 
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(`Failed to initialize client ${sessionId}: ${error.message}`);
+      this.logger.error(`Stack: ${error.stack}`);
       await this.sessionRepository.update(sessionId, {
         status: SessionStatus.FAILED,
       });
+      const statusCallback = this.statusCallbacks.get(sessionId);
+      if (statusCallback) statusCallback('error', { error: error.message });
       throw error;
     }
   }
@@ -213,9 +233,7 @@ export class WhatsappService implements OnModuleDestroy {
     if (activeClient) {
       try {
         activeClient.socket.end(undefined);
-      } catch (e) {
-        // Ignore
-      }
+      } catch (e) {}
       this.clients.delete(sessionId);
     }
 
@@ -303,7 +321,7 @@ export class WhatsappService implements OnModuleDestroy {
 
       log.status = MessageStatus.SENT;
       log.sentAt = new Date();
-    } catch (error) {
+    } catch (error: any) {
       log.status = MessageStatus.FAILED;
       log.error = error.message;
       this.logger.error(`Failed to send message: ${error.message}`);
@@ -400,7 +418,7 @@ export class WhatsappService implements OnModuleDestroy {
 
       log.status = MessageStatus.SENT;
       log.sentAt = new Date();
-    } catch (error) {
+    } catch (error: any) {
       log.status = MessageStatus.FAILED;
       log.error = error.message;
       this.logger.error(`Failed to send media message: ${error.message}`);
