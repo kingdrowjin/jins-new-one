@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: jantu-backend
+    env: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: MESSAGE_DELAY_MIN
+        value: 3000
+      - key: MESSAGE_DELAY_MAX
+        value: 5000
