@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #ecf0f1;
+}
+
+.sidebar {
+  background-color: #2c3e50;
+}
+
+.sidebar-item {
+  @apply flex items-center gap-3 px-4 py-3 text-gray-300 hover:bg-sidebar-hover hover:text-white transition-colors cursor-pointer;
+}
+
+.sidebar-item.active {
+  @apply bg-sidebar-hover text-white;
+}
+
+.btn-primary {
+  @apply bg-primary-500 text-white px-4 py-2 rounded hover:bg-primary-600 transition-colors;
+}
+
+.btn-danger {
+  @apply bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600 transition-colors;
+}
+
+.btn-success {
+  @apply bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 transition-colors;
+}
+
+.input {
+  @apply w-full px-4 py-2.5 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent text-base;
+}
+
+.card {
+  @apply bg-white rounded-lg shadow p-6;
+}
+
+.badge {
+  @apply inline-block px-2 py-1 text-xs font-semibold rounded;
+}
+
+.badge-success {
+  @apply bg-green-100 text-green-800;
+}
+
+.badge-warning {
+  @apply bg-yellow-100 text-yellow-800;
+}
+
+.badge-danger {
+  @apply bg-red-100 text-red-800;
+}
+
+.badge-info {
+  @apply bg-blue-100 text-blue-800;
+}

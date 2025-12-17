@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+
+# WhatsApp Web.js cache
+.wwebjs_cache/
+.wwebjs_auth/
+
+# Build outputs
+dist/
+build/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# WhatsApp sessions (sensitive data)
+whatsapp-sessions/
+backend/whatsapp-sessions/
+
+# Uploads
+uploads/
+backend/uploads/
+
+# TypeORM migrations (if auto-generated)
+# backend/src/migrations/
+
+# Test coverage
+coverage/
+
+# Temporary files
+*.tmp
+*.temp
