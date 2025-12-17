@@ -155,10 +155,22 @@ export class WhatsappService implements OnModuleDestroy {
 
       // Request pairing code if phone number provided
       if (phoneNumber) {
-        // Wait a bit for connection to be ready
-        setTimeout(async () => {
+        // Wait for socket to be ready, then request pairing code
+        const requestCode = async () => {
           try {
-            const formattedPhone = phoneNumber.replace(/[^0-9]/g, '');
+            let formattedPhone = phoneNumber.replace(/[^0-9]/g, '');
+
+            // Ensure phone has country code (at least 10 digits with country code)
+            if (formattedPhone.length < 10) {
+              throw new Error('Phone number too short. Include country code (e.g., 919904280710)');
+            }
+
+            // If phone is exactly 10 digits, assume India and add 91
+            if (formattedPhone.length === 10) {
+              formattedPhone = '91' + formattedPhone;
+              this.logger.log(`Added India country code: ${formattedPhone}`);
+            }
+
             this.logger.log(`Requesting pairing code for phone: ${formattedPhone}`);
             const code = await socket.requestPairingCode(formattedPhone);
             this.logger.log(`Pairing code generated for session ${sessionId}: ${code}`);
@@ -166,10 +178,14 @@ export class WhatsappService implements OnModuleDestroy {
             if (pairingCallback) pairingCallback(code);
           } catch (error) {
             this.logger.error(`Failed to get pairing code: ${error.message}`);
+            this.logger.error(`Full error: ${JSON.stringify(error)}`);
             const statusCallback = this.statusCallbacks.get(sessionId);
             if (statusCallback) statusCallback('error', { error: error.message });
           }
-        }, 2000);
+        };
+
+        // Wait 3 seconds for socket to initialize
+        setTimeout(requestCode, 3000);
       }
 
     } catch (error) {
