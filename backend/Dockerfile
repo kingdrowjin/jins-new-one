@@ -19,14 +19,14 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 WORKDIR /app
 
-# Copy package files
-COPY package.json package-lock.json ./
+# Copy package files (from repo root context)
+COPY backend/package.json backend/package-lock.json ./
 
 # Install ALL dependencies (including devDependencies for build)
 RUN npm ci
 
-# Copy source code
-COPY . .
+# Copy source code (from repo root context)
+COPY backend/ .
 
 # Build the application
 RUN npm run build
