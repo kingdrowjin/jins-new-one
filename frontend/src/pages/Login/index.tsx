@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext'
 import toast from 'react-hot-toast'
 
@@ -8,6 +8,7 @@ export default function Login() {
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const { login } = useAuth()
+  const navigate = useNavigate()
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -16,6 +17,7 @@ export default function Login() {
     try {
       await login(email, password)
       toast.success('Login successful!')
+      navigate('/', { replace: true })
     } catch (error: any) {
       toast.error(error.response?.data?.message || 'Login failed')
     } finally {

@@ -28,7 +28,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const initAuth = async () => {
-      if (token) {
+      // Only fetch profile if we have a token but no user (e.g., page refresh)
+      if (token && !user) {
         try {
           const response = await api.get('/auth/profile')
           setUser(response.data)
@@ -40,7 +41,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setLoading(false)
     }
     initAuth()
-  }, [token])
+  }, []) // Only run on mount, not on token change
 
   const login = async (email: string, password: string) => {
     const response = await api.post('/auth/login', { email, password })

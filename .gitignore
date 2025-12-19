@@ -67,3 +67,4 @@ coverage/
 # Compiled output
 *.js.map
 *.d.ts
+.vercel

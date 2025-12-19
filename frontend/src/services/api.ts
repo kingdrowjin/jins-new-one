@@ -25,9 +25,19 @@ api.interceptors.request.use(
 api.interceptors.response.use(
   (response) => response,
   (error) => {
+    // Only clear token and redirect for 401 on protected routes, not on login/register
     if (error.response?.status === 401) {
-      localStorage.removeItem('token')
-      window.location.href = '/login'
+      const url = error.config?.url || ''
+      // Don't logout if the 401 is from login/register attempts
+      if (!url.includes('/auth/login') && !url.includes('/auth/register')) {
+        // Check if we actually have a token (meaning we're logged in)
+        const token = localStorage.getItem('token')
+        if (token) {
+          localStorage.removeItem('token')
+          // Use soft redirect - let React handle it
+          window.location.replace('/login')
+        }
+      }
     }
     return Promise.reject(error)
   }

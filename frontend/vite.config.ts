@@ -30,6 +30,10 @@ export default defineConfig({
         target: 'http://localhost:3000',
         changeOrigin: true,
       },
+      '/api-keys': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+      },
       '/wapp': {
         target: 'http://localhost:3000',
         changeOrigin: true,
