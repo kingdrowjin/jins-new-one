@@ -1,4 +1,4 @@
-import { Injectable, OnModuleDestroy, Logger } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, OnModuleInit, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -23,15 +23,45 @@ interface ActiveClient {
   socket: WASocket;
   sessionId: number;
   userId: number;
+  retryCount: number;
+  lastActivity: Date;
+  healthCheckInterval?: NodeJS.Timeout;
+}
+
+// Rate limiter for messages
+interface RateLimitEntry {
+  count: number;
+  resetTime: number;
+}
+
+// Error categories for better handling
+enum ErrorCategory {
+  TEMPORARY = 'temporary',      // Can retry
+  RATE_LIMITED = 'rate_limited', // Wait longer
+  LOGGED_OUT = 'logged_out',    // Need re-auth
+  FATAL = 'fatal',              // Don't retry
 }
 
 @Injectable()
-export class WhatsappService implements OnModuleDestroy {
+export class WhatsappService implements OnModuleDestroy, OnModuleInit {
   private readonly logger = new Logger(WhatsappService.name);
   private clients: Map<number, ActiveClient> = new Map();
   private qrCallbacks: Map<number, (qr: string) => void> = new Map();
   private pairingCodeCallbacks: Map<number, (code: string) => void> = new Map();
   private statusCallbacks: Map<number, (status: string, data?: any) => void> = new Map();
+
+  // Rate limiting: max 30 messages per minute per session
+  private rateLimits: Map<number, RateLimitEntry> = new Map();
+  private readonly RATE_LIMIT_MAX = 30;
+  private readonly RATE_LIMIT_WINDOW = 60000; // 1 minute
+
+  // Retry configuration
+  private readonly MAX_RETRIES = 5;
+  private readonly BASE_RETRY_DELAY = 2000; // 2 seconds
+  private readonly MAX_RETRY_DELAY = 300000; // 5 minutes
+
+  // Health check interval
+  private readonly HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
 
   constructor(
     @InjectRepository(WhatsappSession)
@@ -41,14 +71,140 @@ export class WhatsappService implements OnModuleDestroy {
     private configService: ConfigService,
   ) {}
 
+  // Auto-reconnect sessions on startup
+  async onModuleInit() {
+    this.logger.log('WhatsApp Service initializing - checking for sessions to restore...');
+
+    try {
+      // Find all sessions that were connected and have session data
+      const sessionsToRestore = await this.sessionRepository.find({
+        where: { status: SessionStatus.CONNECTED },
+      });
+
+      for (const session of sessionsToRestore) {
+        if (session.sessionData) {
+          this.logger.log(`Auto-restoring session ${session.id} (${session.sessionName})`);
+          // Don't await - let them connect in parallel
+          this.initializeClient(session.id, session.userId).catch(err => {
+            this.logger.error(`Failed to auto-restore session ${session.id}: ${err.message}`);
+          });
+          // Small delay between session inits to avoid overwhelming WhatsApp
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      }
+
+      this.logger.log(`Attempted to restore ${sessionsToRestore.length} sessions`);
+    } catch (error) {
+      this.logger.error(`Error during session restoration: ${error.message}`);
+    }
+  }
+
+  // Categorize errors for appropriate handling
+  private categorizeError(statusCode: number): ErrorCategory {
+    switch (statusCode) {
+      case DisconnectReason.loggedOut:
+      case 401:
+        return ErrorCategory.LOGGED_OUT;
+      case 408: // Timeout
+      case 500: // Server error
+      case 502: // Bad gateway
+      case 503: // Service unavailable
+      case 515: // Restart required
+        return ErrorCategory.TEMPORARY;
+      case 429: // Too many requests
+        return ErrorCategory.RATE_LIMITED;
+      default:
+        if (statusCode >= 400 && statusCode < 500) {
+          return ErrorCategory.FATAL;
+        }
+        return ErrorCategory.TEMPORARY;
+    }
+  }
+
+  // Calculate exponential backoff delay
+  private getRetryDelay(retryCount: number): number {
+    const delay = Math.min(
+      this.BASE_RETRY_DELAY * Math.pow(2, retryCount),
+      this.MAX_RETRY_DELAY
+    );
+    // Add jitter (±20%)
+    const jitter = delay * 0.2 * (Math.random() - 0.5);
+    return Math.floor(delay + jitter);
+  }
+
+  // Check rate limit before sending
+  private checkRateLimit(sessionId: number): { allowed: boolean; waitTime?: number } {
+    const now = Date.now();
+    const entry = this.rateLimits.get(sessionId);
+
+    if (!entry || now > entry.resetTime) {
+      this.rateLimits.set(sessionId, { count: 1, resetTime: now + this.RATE_LIMIT_WINDOW });
+      return { allowed: true };
+    }
+
+    if (entry.count >= this.RATE_LIMIT_MAX) {
+      return { allowed: false, waitTime: entry.resetTime - now };
+    }
+
+    entry.count++;
+    return { allowed: true };
+  }
+
+  // Start health check for a session
+  private startHealthCheck(sessionId: number) {
+    const client = this.clients.get(sessionId);
+    if (!client) return;
+
+    // Clear existing interval if any
+    if (client.healthCheckInterval) {
+      clearInterval(client.healthCheckInterval);
+    }
+
+    client.healthCheckInterval = setInterval(async () => {
+      const activeClient = this.clients.get(sessionId);
+      if (!activeClient) {
+        clearInterval(client.healthCheckInterval);
+        return;
+      }
+
+      // Check if socket is still connected
+      if (!activeClient.socket.user) {
+        this.logger.warn(`Health check failed for session ${sessionId} - no user info`);
+        // Try to reconnect
+        const session = await this.sessionRepository.findOne({ where: { id: sessionId } });
+        if (session && session.sessionData) {
+          this.logger.log(`Attempting health-check reconnect for session ${sessionId}`);
+          this.initializeClient(sessionId, session.userId).catch(err => {
+            this.logger.error(`Health-check reconnect failed: ${err.message}`);
+          });
+        }
+      } else {
+        activeClient.lastActivity = new Date();
+      }
+    }, this.HEALTH_CHECK_INTERVAL);
+  }
+
+  // Stop health check for a session
+  private stopHealthCheck(sessionId: number) {
+    const client = this.clients.get(sessionId);
+    if (client?.healthCheckInterval) {
+      clearInterval(client.healthCheckInterval);
+      client.healthCheckInterval = undefined;
+    }
+  }
+
   async onModuleDestroy() {
+    this.logger.log('WhatsApp Service shutting down...');
     for (const [sessionId, activeClient] of this.clients) {
       try {
+        this.stopHealthCheck(sessionId);
         activeClient.socket.end(undefined);
       } catch (error) {
         this.logger.error(`Error destroying client ${sessionId}: ${error.message}`);
       }
     }
+    this.clients.clear();
+    this.rateLimits.clear();
   }
 
   async createSession(userId: number, sessionName: string): Promise<WhatsappSession> {
@@ -67,12 +223,14 @@ export class WhatsappService implements OnModuleDestroy {
     onStatus?: (status: string, data?: any) => void,
     phoneNumber?: string,
     onPairingCode?: (code: string) => void,
+    retryCount: number = 0,
   ): Promise<void> {
     // Close existing connection if any
     if (this.clients.has(sessionId)) {
       const existing = this.clients.get(sessionId);
       if (existing) {
         try {
+          this.stopHealthCheck(sessionId);
           existing.socket.end(undefined);
         } catch (e) {}
       }
@@ -83,7 +241,7 @@ export class WhatsappService implements OnModuleDestroy {
     if (onPairingCode) this.pairingCodeCallbacks.set(sessionId, onPairingCode);
     if (onStatus) this.statusCallbacks.set(sessionId, onStatus);
 
-    this.logger.log(`Initializing Baileys client for session ${sessionId}`);
+    this.logger.log(`Initializing Baileys client for session ${sessionId} (attempt ${retryCount + 1}/${this.MAX_RETRIES + 1})`);
 
     try {
       // Use database-backed auth state for persistence across deployments
@@ -107,8 +265,14 @@ export class WhatsappService implements OnModuleDestroy {
         syncFullHistory: false,
       });
 
-      // Store client
-      this.clients.set(sessionId, { socket, sessionId, userId });
+      // Store client with retry tracking
+      this.clients.set(sessionId, {
+        socket,
+        sessionId,
+        userId,
+        retryCount,
+        lastActivity: new Date(),
+      });
 
       // Handle connection updates
       socket.ev.on('connection.update', async (update) => {
@@ -124,34 +288,61 @@ export class WhatsappService implements OnModuleDestroy {
         }
 
         if (connection === 'close') {
-          const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-          const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-          this.logger.warn(`Connection closed for session ${sessionId}, code: ${statusCode}, reconnect: ${shouldReconnect}`);
+          const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode || 500;
+          const errorCategory = this.categorizeError(statusCode);
+          const currentClient = this.clients.get(sessionId);
+          const currentRetryCount = currentClient?.retryCount || 0;
 
+          this.logger.warn(`Connection closed for session ${sessionId}, code: ${statusCode}, category: ${errorCategory}, retries: ${currentRetryCount}`);
+
+          this.stopHealthCheck(sessionId);
           this.clients.delete(sessionId);
 
-          if (!shouldReconnect) {
-            // Logged out - don't reconnect
+          if (errorCategory === ErrorCategory.LOGGED_OUT) {
+            // Logged out - clear session data and don't reconnect
             await this.sessionRepository.update(sessionId, {
               status: SessionStatus.DISCONNECTED,
+              sessionData: null, // Clear credentials
             });
             const statusCallback = this.statusCallbacks.get(sessionId);
-            if (statusCallback) statusCallback('disconnected', { reason: 'logged_out' });
-          } else if (statusCode === 515) {
-            // Restart required - reconnect once after delay
-            this.logger.log(`Reconnecting session ${sessionId} due to restart required (515)`);
+            if (statusCallback) statusCallback('disconnected', { reason: 'logged_out', needsReauth: true });
+
+          } else if (errorCategory === ErrorCategory.FATAL) {
+            // Fatal error - don't retry
+            await this.sessionRepository.update(sessionId, {
+              status: SessionStatus.FAILED,
+            });
+            const statusCallback = this.statusCallbacks.get(sessionId);
+            if (statusCallback) statusCallback('error', { code: statusCode, fatal: true });
+
+          } else if (currentRetryCount < this.MAX_RETRIES) {
+            // Temporary or rate-limited error - retry with exponential backoff
+            const delay = errorCategory === ErrorCategory.RATE_LIMITED
+              ? this.getRetryDelay(currentRetryCount) * 2 // Double delay for rate limits
+              : this.getRetryDelay(currentRetryCount);
+
+            this.logger.log(`Will retry session ${sessionId} in ${Math.round(delay / 1000)}s (attempt ${currentRetryCount + 2}/${this.MAX_RETRIES + 1})`);
+
+            await this.sessionRepository.update(sessionId, {
+              status: SessionStatus.PENDING,
+            });
 
             setTimeout(() => {
               const statusCallback = this.statusCallbacks.get(sessionId);
-              if (statusCallback) statusCallback('reconnecting');
+              if (statusCallback) statusCallback('reconnecting', { attempt: currentRetryCount + 2 });
 
-              this.initializeClient(sessionId, userId, onQr, onStatus, phoneNumber, onPairingCode)
+              this.initializeClient(sessionId, userId, onQr, onStatus, phoneNumber, onPairingCode, currentRetryCount + 1)
                 .catch(err => this.logger.error(`Reconnect failed: ${err.message}`));
-            }, 2000);
+            }, delay);
+
           } else {
-            // Other disconnects - notify but don't auto-reconnect aggressively
+            // Max retries exceeded
+            this.logger.error(`Max retries exceeded for session ${sessionId}`);
+            await this.sessionRepository.update(sessionId, {
+              status: SessionStatus.FAILED,
+            });
             const statusCallback = this.statusCallbacks.get(sessionId);
-            if (statusCallback) statusCallback('disconnected', { code: statusCode });
+            if (statusCallback) statusCallback('error', { code: statusCode, maxRetriesExceeded: true });
           }
         } else if (connection === 'open') {
           this.logger.log(`Client connected for session ${sessionId}`);
@@ -159,10 +350,20 @@ export class WhatsappService implements OnModuleDestroy {
           // Get phone number from socket
           const phoneNum = socket.user?.id?.split(':')[0] || socket.user?.id;
 
+          // Reset retry count on successful connection
+          const client = this.clients.get(sessionId);
+          if (client) {
+            client.retryCount = 0;
+            client.lastActivity = new Date();
+          }
+
           await this.sessionRepository.update(sessionId, {
             status: SessionStatus.CONNECTED,
             phoneNumber: phoneNum,
           });
+
+          // Start health monitoring
+          this.startHealthCheck(sessionId);
 
           const statusCallback = this.statusCallbacks.get(sessionId);
           if (statusCallback) {
@@ -251,13 +452,16 @@ export class WhatsappService implements OnModuleDestroy {
     const activeClient = this.clients.get(sessionId);
     if (activeClient) {
       try {
+        this.stopHealthCheck(sessionId);
         activeClient.socket.end(undefined);
       } catch (e) {}
       this.clients.delete(sessionId);
     }
 
-    // Session data is stored in database, will be deleted with the session record
+    // Clean up rate limit entry
+    this.rateLimits.delete(sessionId);
 
+    // Session data is stored in database, will be deleted with the session record
     await this.sessionRepository.delete(sessionId);
     return true;
   }
@@ -279,6 +483,15 @@ export class WhatsappService implements OnModuleDestroy {
     if (!activeClient) {
       throw new Error('Session not active');
     }
+
+    // Check rate limit
+    const rateCheck = this.checkRateLimit(sessionId);
+    if (!rateCheck.allowed) {
+      throw new Error(`Rate limit exceeded. Please wait ${Math.ceil(rateCheck.waitTime! / 1000)} seconds.`);
+    }
+
+    // Update last activity
+    activeClient.lastActivity = new Date();
 
     // Format recipient number - add country code if needed
     let formattedNumber = recipient.replace(/[^0-9]/g, '');
@@ -378,6 +591,15 @@ export class WhatsappService implements OnModuleDestroy {
     if (!activeClient) {
       throw new Error('Session not active');
     }
+
+    // Check rate limit
+    const rateCheck = this.checkRateLimit(sessionId);
+    if (!rateCheck.allowed) {
+      throw new Error(`Rate limit exceeded. Please wait ${Math.ceil(rateCheck.waitTime! / 1000)} seconds.`);
+    }
+
+    // Update last activity
+    activeClient.lastActivity = new Date();
 
     // Format recipient number - add country code if needed
     let formattedNumber = recipient.replace(/[^0-9]/g, '');

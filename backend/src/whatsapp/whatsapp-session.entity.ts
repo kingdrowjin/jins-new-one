@@ -28,7 +28,7 @@ export class WhatsappSession {
   sessionName: string;
 
   @Column({ type: 'text', nullable: true })
-  sessionData: string;
+  sessionData: string | null;
 
   @Column({
     type: 'enum',
