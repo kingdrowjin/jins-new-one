@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import * as path from 'path';
 import * as fs from 'fs';
 import pino from 'pino';
+// Note: path and fs still needed for media file handling
 import { WhatsappSession, SessionStatus } from './whatsapp-session.entity';
 import { MessageLog, MessageStatus, MessageSource } from './message-log.entity';
 import { Boom } from '@hapi/boom';
@@ -12,11 +13,11 @@ import { Boom } from '@hapi/boom';
 // Baileys 6.x imports
 import makeWASocket, {
   DisconnectReason,
-  useMultiFileAuthState,
-  fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
+  fetchLatestBaileysVersion,
 } from '@whiskeysockets/baileys';
 import type { WASocket } from '@whiskeysockets/baileys';
+import { useDBAuthState } from './db-auth-state';
 
 interface ActiveClient {
   socket: WASocket;
@@ -82,20 +83,13 @@ export class WhatsappService implements OnModuleDestroy {
     if (onPairingCode) this.pairingCodeCallbacks.set(sessionId, onPairingCode);
     if (onStatus) this.statusCallbacks.set(sessionId, onStatus);
 
-    const sessionPath = path.join(
-      this.configService.get('WHATSAPP_SESSION_PATH', './whatsapp-sessions'),
-      `session-${sessionId}`,
-    );
-
-    // Ensure session directory exists
-    if (!fs.existsSync(sessionPath)) {
-      fs.mkdirSync(sessionPath, { recursive: true });
-    }
-
     this.logger.log(`Initializing Baileys client for session ${sessionId}`);
 
     try {
-      const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+      // Use database-backed auth state for persistence across deployments
+      const { state, saveCreds } = await useDBAuthState(this.sessionRepository, sessionId);
+
+      // Fetch the latest WhatsApp Web version
       const { version } = await fetchLatestBaileysVersion();
 
       this.logger.log(`Using Baileys version: ${version.join('.')}`);
@@ -108,15 +102,9 @@ export class WhatsappService implements OnModuleDestroy {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }) as any,
-        browser: ['Ubuntu', 'Chrome', '120.0.6099.109'],
+        browser: ['Ubuntu', 'Chrome', '114.0.0.0'] as [string, string, string],
         generateHighQualityLinkPreview: false,
         syncFullHistory: false,
-        connectTimeoutMs: 60000,
-        qrTimeout: 40000,
-        defaultQueryTimeoutMs: 60000,
-        keepAliveIntervalMs: 25000,
-        retryRequestDelayMs: 250,
-        markOnlineOnConnect: false,
       });
 
       // Store client
@@ -140,13 +128,30 @@ export class WhatsappService implements OnModuleDestroy {
           const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
           this.logger.warn(`Connection closed for session ${sessionId}, code: ${statusCode}, reconnect: ${shouldReconnect}`);
 
+          this.clients.delete(sessionId);
+
           if (!shouldReconnect) {
+            // Logged out - don't reconnect
             await this.sessionRepository.update(sessionId, {
               status: SessionStatus.DISCONNECTED,
             });
-            this.clients.delete(sessionId);
             const statusCallback = this.statusCallbacks.get(sessionId);
             if (statusCallback) statusCallback('disconnected', { reason: 'logged_out' });
+          } else if (statusCode === 515) {
+            // Restart required - reconnect once after delay
+            this.logger.log(`Reconnecting session ${sessionId} due to restart required (515)`);
+
+            setTimeout(() => {
+              const statusCallback = this.statusCallbacks.get(sessionId);
+              if (statusCallback) statusCallback('reconnecting');
+
+              this.initializeClient(sessionId, userId, onQr, onStatus, phoneNumber, onPairingCode)
+                .catch(err => this.logger.error(`Reconnect failed: ${err.message}`));
+            }, 2000);
+          } else {
+            // Other disconnects - notify but don't auto-reconnect aggressively
+            const statusCallback = this.statusCallbacks.get(sessionId);
+            if (statusCallback) statusCallback('disconnected', { code: statusCode });
           }
         } else if (connection === 'open') {
           this.logger.log(`Client connected for session ${sessionId}`);
@@ -169,13 +174,19 @@ export class WhatsappService implements OnModuleDestroy {
       // Handle credential updates
       socket.ev.on('creds.update', saveCreds);
 
-      // Request pairing code if phone number provided
-      if (phoneNumber) {
+      // Request pairing code if phone number provided AND not already registered
+      if (phoneNumber && !state.creds.registered) {
         this.logger.log(`Will request pairing code for phone: ${phoneNumber}`);
 
         // Wait for socket to be ready, then request pairing code
         const requestCode = async () => {
           try {
+            // Double check we're not already registered
+            if (state.creds.registered) {
+              this.logger.log(`Already registered, skipping pairing code request`);
+              return;
+            }
+
             let formattedPhone = phoneNumber.replace(/[^0-9]/g, '');
 
             // If phone is exactly 10 digits, assume India and add 91
@@ -202,7 +213,6 @@ export class WhatsappService implements OnModuleDestroy {
             if (pairingCallback) pairingCallback(code);
           } catch (error: any) {
             this.logger.error(`Failed to get pairing code: ${error.message}`);
-            this.logger.error(`Stack: ${error.stack}`);
             const statusCallback = this.statusCallbacks.get(sessionId);
             if (statusCallback) statusCallback('error', { error: error.message });
           }
@@ -210,6 +220,8 @@ export class WhatsappService implements OnModuleDestroy {
 
         // Wait 3 seconds for socket to initialize
         setTimeout(requestCode, 3000);
+      } else if (phoneNumber && state.creds.registered) {
+        this.logger.log(`Session ${sessionId} already registered, will auto-connect`);
       }
 
     } catch (error: any) {
@@ -244,14 +256,7 @@ export class WhatsappService implements OnModuleDestroy {
       this.clients.delete(sessionId);
     }
 
-    // Delete session folder
-    const sessionPath = path.join(
-      this.configService.get('WHATSAPP_SESSION_PATH', './whatsapp-sessions'),
-      `session-${sessionId}`,
-    );
-    if (fs.existsSync(sessionPath)) {
-      fs.rmSync(sessionPath, { recursive: true, force: true });
-    }
+    // Session data is stored in database, will be deleted with the session record
 
     await this.sessionRepository.delete(sessionId);
     return true;
@@ -275,8 +280,13 @@ export class WhatsappService implements OnModuleDestroy {
       throw new Error('Session not active');
     }
 
-    // Format recipient number
+    // Format recipient number - add country code if needed
     let formattedNumber = recipient.replace(/[^0-9]/g, '');
+    // If 10 digits, assume India and add 91
+    if (formattedNumber.length === 10) {
+      formattedNumber = '91' + formattedNumber;
+      this.logger.log(`Added country code: ${formattedNumber}`);
+    }
     if (!formattedNumber.includes('@')) {
       formattedNumber = `${formattedNumber}@s.whatsapp.net`;
     }
@@ -369,8 +379,13 @@ export class WhatsappService implements OnModuleDestroy {
       throw new Error('Session not active');
     }
 
-    // Format recipient number
+    // Format recipient number - add country code if needed
     let formattedNumber = recipient.replace(/[^0-9]/g, '');
+    // If 10 digits, assume India and add 91
+    if (formattedNumber.length === 10) {
+      formattedNumber = '91' + formattedNumber;
+      this.logger.log(`Added country code: ${formattedNumber}`);
+    }
     if (!formattedNumber.includes('@')) {
       formattedNumber = `${formattedNumber}@s.whatsapp.net`;
     }
