@@ -77,22 +77,28 @@ export class WhatsappGateway implements OnGatewayConnection, OnGatewayDisconnect
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { sessionId: number; userId: number; phoneNumber: string },
   ) {
-    const { sessionId, userId, phoneNumber } = data;
-    this.logger.log(`Initializing session ${sessionId} with phone ${phoneNumber} for user ${userId}`);
+    // whatsapp-web.js doesn't support pairing codes, redirect to QR method
+    const { sessionId, userId } = data;
+    this.logger.log(`Pairing code not supported with whatsapp-web.js, using QR for session ${sessionId}`);
 
+    client.emit('status', {
+      status: 'info',
+      sessionId,
+      message: 'Pairing code not supported. Please use QR code instead.'
+    });
+
+    // Fall back to QR code method
     this.clientSessions.set(client.id, { userId, sessionId, socket: client });
 
     try {
       await this.whatsappService.initializeClient(
         sessionId,
         userId,
-        undefined, // No QR callback
+        (qr) => {
+          client.emit('qr', { qr, sessionId });
+        },
         (status, statusData) => {
           client.emit('status', { status, sessionId, ...statusData });
-        },
-        phoneNumber,
-        (code) => {
-          client.emit('pairingCode', { code, sessionId });
         },
       );
     } catch (error: any) {
