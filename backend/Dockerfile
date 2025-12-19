@@ -19,14 +19,14 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 WORKDIR /app
 
-# Copy package files from backend directory (Railway uses repo root as context)
-COPY backend/package.json backend/package-lock.json ./
+# Copy package files
+COPY package.json package-lock.json ./
 
 # Install ALL dependencies (including devDependencies for build)
 RUN npm ci
 
-# Copy backend source code
-COPY backend/ .
+# Copy source code
+COPY . .
 
 # Build the application
 RUN npm run build
