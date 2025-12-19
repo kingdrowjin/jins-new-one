@@ -1,16 +1,17 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { InjectQueue } from '@nestjs/bull';
-import { Queue } from 'bull';
 import { Campaign, CampaignStatus } from './campaign.entity';
 import { CampaignRecipient, RecipientStatus } from './campaign-recipient.entity';
 import { CampaignMedia, MediaType } from './campaign-media.entity';
 import { CreateCampaignDto } from './dto/create-campaign.dto';
 import { WhatsappService } from '../whatsapp/whatsapp.service';
+import { MessageSource } from '../whatsapp/message-log.entity';
 
 @Injectable()
 export class CampaignsService {
+  private readonly logger = new Logger(CampaignsService.name);
+
   constructor(
     @InjectRepository(Campaign)
     private campaignRepository: Repository<Campaign>,
@@ -19,8 +20,6 @@ export class CampaignsService {
     @InjectRepository(CampaignMedia)
     private mediaRepository: Repository<CampaignMedia>,
     private whatsappService: WhatsappService,
-    @InjectQueue('messages')
-    private messageQueue: Queue,
   ) {}
 
   async create(userId: number, createCampaignDto: CreateCampaignDto): Promise<Campaign> {
@@ -109,25 +108,62 @@ export class CampaignsService {
       status: CampaignStatus.RUNNING,
     });
 
+    // Send messages directly (no Redis queue needed)
+    this.sendCampaignMessages(campaignId, userId, campaign);
+
+    return this.findOne(campaignId, userId);
+  }
+
+  // Send campaign messages directly without queue
+  private async sendCampaignMessages(campaignId: number, userId: number, campaign: Campaign) {
+    this.logger.log(`Starting to send campaign ${campaignId} messages`);
+
     for (const recipient of campaign.recipients) {
-      if (recipient.status === RecipientStatus.PENDING) {
-        await this.messageQueue.add('send-campaign-message', {
-          campaignId,
-          recipientId: recipient.id,
-          sessionId: campaign.sessionId,
+      if (recipient.status !== RecipientStatus.PENDING) continue;
+
+      try {
+        // Build message with link and call buttons
+        let fullMessage = campaign.message || '';
+        if (campaign.linkText && campaign.linkUrl) {
+          fullMessage += `\n\n${campaign.linkText}: ${campaign.linkUrl}`;
+        }
+        if (campaign.callText && campaign.callNumber) {
+          fullMessage += `\n${campaign.callText}: ${campaign.callNumber}`;
+        }
+
+        // Get first media file if any
+        const mediaPath = campaign.media?.[0]?.filePath;
+
+        // Send the message
+        await this.whatsappService.sendMessage(
+          campaign.sessionId,
           userId,
-          phoneNumber: recipient.phoneNumber,
-          message: campaign.message,
-          linkText: campaign.linkText,
-          linkUrl: campaign.linkUrl,
-          callText: campaign.callText,
-          callNumber: campaign.callNumber,
-          media: campaign.media,
-        });
+          recipient.phoneNumber,
+          fullMessage,
+          mediaPath,
+          MessageSource.CAMPAIGN,
+        );
+
+        // Update recipient status to sent
+        await this.updateRecipientStatus(recipient.id, RecipientStatus.SENT);
+        this.logger.log(`Sent campaign message to ${recipient.phoneNumber}`);
+
+        // Small delay between messages to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+      } catch (error: any) {
+        this.logger.error(`Failed to send to ${recipient.phoneNumber}: ${error.message}`);
+        await this.updateRecipientStatus(recipient.id, RecipientStatus.FAILED, error.message);
       }
     }
 
-    return this.findOne(campaignId, userId);
+    // Check if campaign is complete
+    const updatedCampaign = await this.campaignRepository.findOne({ where: { id: campaignId } });
+    if (updatedCampaign && updatedCampaign.sentCount + updatedCampaign.failedCount >= updatedCampaign.totalRecipients) {
+      await this.campaignRepository.update(campaignId, { status: CampaignStatus.COMPLETED });
+    }
+
+    this.logger.log(`Campaign ${campaignId} finished sending`);
   }
 
   async updateRecipientStatus(

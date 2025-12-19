@@ -6,13 +6,11 @@ import { Campaign } from './campaign.entity';
 import { CampaignRecipient } from './campaign-recipient.entity';
 import { CampaignMedia } from './campaign-media.entity';
 import { WhatsappModule } from '../whatsapp/whatsapp.module';
-import { QueueModule } from '../queue/queue.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Campaign, CampaignRecipient, CampaignMedia]),
     WhatsappModule,
-    QueueModule,
   ],
   providers: [CampaignsService],
   controllers: [CampaignsController],
