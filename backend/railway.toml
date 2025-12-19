@@ -4,5 +4,5 @@ dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "node dist/main.js"
-healthcheckPath = "/"
+healthcheckPath = "/api/docs"
 restartPolicyType = "on_failure"
