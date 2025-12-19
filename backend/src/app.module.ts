@@ -8,7 +8,6 @@ import { SmsModule } from './sms/sms.module';
 import { CampaignsModule } from './campaigns/campaigns.module';
 import { ApiKeysModule } from './api-keys/api-keys.module';
 import { UploadsModule } from './uploads/uploads.module';
-import { QueueModule } from './queue/queue.module';
 
 @Module({
   imports: [
@@ -39,7 +38,6 @@ import { QueueModule } from './queue/queue.module';
     CampaignsModule,
     ApiKeysModule,
     UploadsModule,
-    QueueModule,
   ],
 })
 export class AppModule {}
