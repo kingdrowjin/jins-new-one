@@ -167,24 +167,32 @@ export class WhatsappService implements OnModuleDestroy, OnModuleInit {
 
     try {
       // Create client with LocalAuth for session persistence
+      const puppeteerOptions: any = {
+        headless: true,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote',
+          '--single-process',
+          '--disable-gpu',
+        ],
+      };
+
+      // Use system Chromium if available (for Docker/Railway)
+      if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+        puppeteerOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+        this.logger.log(`Using Chromium at: ${process.env.PUPPETEER_EXECUTABLE_PATH}`);
+      }
+
       const client = new Client({
         authStrategy: new LocalAuth({
           clientId: `session-${sessionId}`,
           dataPath: this.SESSION_DIR,
         }),
-        puppeteer: {
-          headless: true,
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process',
-            '--disable-gpu',
-          ],
-        },
+        puppeteer: puppeteerOptions,
       });
 
       // Store client
